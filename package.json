@@ -1,0 +1,9 @@
+{
+  "devDependencies": {
+    "@types/node": "^18.13.0"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs": "^4.2.0",
+    "lodash": "^4.17.21"
+  }
+}
