@@ -1,10 +1,8 @@
-import { Tensor } from "@tensorflow/tfjs";
-import { Tensor1D, Tensor2D} from "@tensorflow/tfjs-core";
+import { Tensor, Tensor1D, Tensor2D, Rank } from "@tensorflow/tfjs";
+import * as tf from '@tensorflow/tfjs'
+// just for test
+import * as fs from 'fs'
 
-
-const tf = require('@tensorflow/tfjs');
-const _ = require('lodash');
-const fs = require("fs");
 
 
 const periodic_table = [ 'H','He'
@@ -28,13 +26,10 @@ const periodic_table = [ 'H','He'
 
 
 
-class Molecule {
-    private angle:Tensor1D;
-    private center:Tensor1D;
-    private cell_vec:Tensor1D;
-    private natom:number;
-    private elements:string[];
-    private coordinates:Tensor2D;
+class Structure {
+    protected natom:number;
+    protected elements:string[];
+    protected coordinates:Tensor2D;
 
     // overload
     constructor(xyz_file:string);  // input XYZ file
@@ -42,9 +37,9 @@ class Molecule {
     // define
     constructor(elements:string|string[], coordinates?:number[][]){
         if ((elements instanceof Array) && (coordinates instanceof Array)) { // input array
-            this.prase_array(elements, coordinates)
+            this.parse_array(elements, coordinates)
         } else if ((typeof elements == 'string') && (typeof coordinates == 'undefined')) {  // input xyz file
-            let error_line = this.prase_xyz_file(elements)
+            let error_line = this.parse_xyz_file(elements)
             if(error_line != -1) throw "something wrong in input file " + error_line.toString() + " lines";
         } else {
             throw "something wrong in input variable type: \n"
@@ -53,8 +48,8 @@ class Molecule {
         }
     }
 
-    // prase the XYZ file in string to Molecule, success return -1, if not return the line number
-    public prase_xyz_file(xyz_file:string):number {
+    // parse the XYZ file in string to Structure, success return -1, if not return the line number
+    public parse_xyz_file(xyz_file:string):number {
         let contan_list:string[] = xyz_file.replace(/(\r*\n)+$/g,'').split(/\r*\n/);  // remove excess \n at the end of the XYZ file, and split it
         this.natom = parseInt(contan_list[0]);  // get the number of atoms
         if(isNaN(this.natom) || (contan_list.length<3) || (this.natom+2 != contan_list.length)) return 1;
@@ -67,22 +62,82 @@ class Molecule {
             temp_elements.push(line[0]);
             temp_coordinates.push([parseFloat(line[1]), parseFloat(line[2]), parseFloat(line[3])]);
         }
-        // array to Molecule
-        this.prase_array(temp_elements, temp_coordinates);
+        // array to Structure
+        this.parse_array(temp_elements, temp_coordinates);
         return -1;
     }
 
-    // trans the elements array and coordinates array to Molecule
-    public prase_array(elements:string[], coordinates:number[][]) {
+    // trans the elements array and coordinates array to Structure
+    public parse_array(elements:string[], coordinates:number[][]) {
         if(elements.length != coordinates.length) {
             throw "elements and coordinates length are not equal";
         }
         this.elements = elements;
-        this.coordinates = tf.tensor2d(coordinates, [coordinates.length, 3], 'float32');
-        this.angle = tf.zeros([3]);
-        this.calc_center();
-        this.calc_cell();
+        this.coordinates = tf.tidy(() => {
+            let temp_coordinates = tf.tensor2d(coordinates, [coordinates.length, 3], 'float32');
+            return tf.sub(temp_coordinates, temp_coordinates.mean(0));
+        });
     }
+
+    // remove the atom that index is n, the index starts from 0
+    public remove_atom(n:number){
+        this.natom -= 1;
+        this.elements.splice(n, 1);
+        this.coordinates = tf.tidy(() => {
+            let temp_list = this.coordinates.unstack();
+            this.coordinates.dispose();
+            temp_list.splice(n, 1);
+            return <Tensor2D>tf.stack(temp_list);
+        });
+    }
+
+    // parse elements and coordinates to string in XYZ 
+    public async to_XYZ(coordinates:Tensor2D = this.coordinates):Promise<{natom:number, xyz:string}> {
+        let natom = this.natom;
+        let xyz = '';
+        return coordinates.array().then(
+            (vale):{natom:number, xyz:string} => {
+                this.elements.forEach((ele, index) => {
+                    xyz += ele;
+                    vale[index].forEach((x) => {
+                        xyz += "    ";
+                        xyz += String(x.toPrecision(12));
+                    })
+                    xyz += '\n';
+                });
+                coordinates.dispose();
+                return {natom, xyz};
+            },
+            () => {
+                throw "some wrong in Structure to_XYZ()";
+            }
+        );
+    }
+
+    public get_atoms(){
+        return [this.natom, this.elements, this.coordinates];
+    }
+
+    public get_natom(){
+        return this.natom;
+    }
+
+    public get_elements(){
+        return this.elements;
+    }
+
+    public get_coordinates(){
+        return this.coordinates;
+    }
+
+}
+
+
+
+class Molecule extends Structure{
+    private angle:Tensor;
+    private center:Tensor;
+    private cell_vec:Tensor;
 
     // calculate the geometry center of the molecule
     private calc_center() {
@@ -101,13 +156,13 @@ class Molecule {
     }
 
     // add coordinates to molecule coordinates
-    public move(coordinates:Tensor1D) {
+    public move(coordinates:Tensor) {
         this.center = tf.add(this.center, coordinates);
         this.coordinates = tf.add(this.coordinates, this.center);
     }
 
     // move the molecule to coordinates
-    public move_to(coordinates:Tensor1D) {
+    public move_to(coordinates:Tensor) {
         this.coordinates = tf.add(this.coordinates, tf.sub(coordinates, this.center));
         this.center = coordinates;
     }
@@ -127,47 +182,8 @@ class Molecule {
         this.rotate(alpha-this.angle[0], beta-this.angle[1], gamma-this.angle[2]);
     }
 
-    // remove the atom that index is n, the index starts from 0
-    public remove_atom(n:number){
-        this.natom -= 1;
-        this.elements = this.elements.splice(n, 1);
-        this.coordinates = tf.stack(tf.splice(this.coordinates, [0, 0], [n, 3]), tf.splice(this.coordinates, [n+1, 0], [this.natom-n, 3]) );
-    }
-
-    public to_XYZ():{natom:number, xyz:string} {
-        let natom = this.natom;
-        let xyz = '';
-        let coordinates = this.coordinates.arraySync();
-        this.elements.forEach((ele, index) => {
-            xyz += ele;
-            coordinates[index].forEach((x) => {
-                xyz += "    ";
-                xyz += String(x.toPrecision(12));
-            })
-            xyz += '\n';
-        });
-        
-        return {natom, xyz};
-    }
-
-    public get_atoms(){
-        return [this.natom, this.elements, this.coordinates];
-    }
-
     public get_cell(){
         return [this.angle, this.center, this.cell_vec];
-    }
-
-    public get_natom(){
-        return this.natom;
-    }
-
-    public get_elements(){
-        return this.elements;
-    }
-
-    public get_coordinates(){
-        return this.coordinates;
     }
 
     public get_angle(){
@@ -181,25 +197,26 @@ class Molecule {
     public get_cell_vec(){
         return this.cell_vec;
     }
-
 }
+
 
 
 class Packmol{
     private distance:number;
     private box_size:number[];
     private box_type:string;
-    private molecule_types:Molecule[];
+    private mol_types:Structure[];
     private num_mol:number[];
-    private molecules:Molecule[][];
+    private mol:Structure[];
+    private coordinates:Tensor2D;
 
     // creat a box
     constructor(box_size:number[], box_type:string){
         this.change_box(box_size, box_type);
         this.distance = 0;
-        this.molecule_types = [];
+        this.mol_types = [];
         this.num_mol = [];
-        this.molecules = [];
+        this.mol = [];
     }
 
     // change the box size and type
@@ -217,10 +234,10 @@ class Packmol{
     }
 
     // add moelecule to box
-    public add_molecule(molecule:Molecule, num:number){
-        let index = this.molecule_types.indexOf(molecule);
+    public add_molecule(molecule:Structure, num:number){
+        let index = this.mol_types.indexOf(molecule);
         if(index == -1){
-            this.molecule_types.push(molecule);
+            this.mol_types.push(molecule);
             this.num_mol.push(num);
         }else{
             this.num_mol[index] += num;
@@ -228,97 +245,113 @@ class Packmol{
     }
 
     public random_coordinates(seed:number = Date.now()){
-        if(this.molecule_types.length == 0) throw "there have no molecules in the box";
+        if(this.mol_types.length == 0) throw "there have no molecules in the box";
+        var creat_rand_tensor;
         switch(this.box_type){
             case "cube":
-                var creat_rand_tensor = (val:number):Tensor[] => {return tf.randomUniform([val, 3], 0, this.box_size[0], 'float32', seed).unstack()};
+                creat_rand_tensor = (val:number):Tensor2D => {return tf.randomUniform([val, 3], 0, this.box_size[0], 'float32', seed)};
                 break;
             case "cuboid":
                 break;
         }
+
+        let nmol = 0;
         this.num_mol.forEach((num, index) => {
-            let mol = this.molecule_types[index];
-            let temp_mol:Molecule[] = [];
-            let temp_coordinates = creat_rand_tensor(num);
+            let mol = this.mol_types[index];
             for(let i=0; i<num; i++){
-                mol.move_to(temp_coordinates[i].reshape([3]));
-                temp_mol.push(_.clone(mol));
+                this.mol.push(mol);
             }
-            this.molecules.push(temp_mol);
+            nmol += num;
         });
+
+        if(typeof this.coordinates != "undefined") this.coordinates.dispose();
+        this.coordinates = creat_rand_tensor(nmol);
     }
 
     // calculate the distances for each atom in mol_1 and mol_2, if a distance is less than tolerance set it to 0
-    // mol_x = [molecule type index, molecule coordinates index]
-    private calc_distance_mol(index_1:number[], index_2:number[], tolerance:number):number {
-        let mol_1 = this.molecules[index_1[0]][index_1[1]];
-        let mol_2 = this.molecules[index_2[0]][index_2[1]];
+    // center of mol_1 is point M, mol_2 is N, atom_1 is A, atom_2 is B
+    private async calc_distance_mol(index_1:number, center_1:Tensor1D, index_2:number, center_2:Tensor1D,tolerance:number):Promise<number> {
+        let mol_1 = this.mol[index_1];
+        let mol_2 = this.mol[index_2];
 
-        let distance = 0;
-        let zero = tf.zeros([mol_2.get_natom()]);
+        let distance = 0;  // |AB|
+        let R = center_2.sub(center_1);  // R: ON - OM = MN
         // loop in mol_1
-        mol_1.get_coordinates().unstack().forEach((val) => {
-            let delta_vec = tf.sub(val, mol_2.get_coordinates());
-            // distance between val and another atom in mol_2 subtract tolerance
-            let each_distance = tf.sub(tf.einsum('ia, ia -> i', delta_vec, delta_vec), [tolerance]);
-            let cond = tf.less(each_distance, zero);
-            // find the distance less then tolerance
-            each_distance = tf.where(cond, each_distance, zero);
-            distance += each_distance.sum(0).arraySync();
+        mol_1.get_coordinates().unstack().forEach((r_1) => {  // r_1: MA
+            let zero = tf.zeros([mol_2.get_natom()]);
+            distance += tf.tidy(() => {
+                let delta_r = R.sub(r_1);  // delta_r: MN - MA = AN
+                let each_r = delta_r.add(mol_2.get_coordinates());  // each_r: AN + NB = AB
+                let each_d = tf.einsum("ij, ij -> i", each_r, each_r);
+                let cond = tf.less(each_d, [tolerance]);
+                return <number>tf.where(cond, each_d, zero).sqrt().sum().arraySync();
+            });
         });
         return distance;
     }
 
     // calculate the distances for all atom in box
-    public calc_distance_box(tolerance:number):number {
-        let distance = 0.0;
-        let n_type = this.molecule_types.length;
-        for(let type_1=0; type_1<n_type; type_1++){
-            // calculate the distance between the same type of molecule
-            for(let mol_1=0; mol_1<this.molecules[type_1].length; mol_1++){
-                for(let mol_2=mol_1+1; mol_2<this.molecules[type_1].length; mol_2++){
-                    distance += this.calc_distance_mol([type_1, mol_1], [type_1, mol_2], tolerance);
-                }
-            }
-            // calculate the distance between different type of molecule
-            for(let type_2=type_1+1; type_2<n_type; type_2++){
-                for(let mol_1=0; mol_1<this.molecules[type_1].length; mol_1++){
-                    for(let mol_2=0; mol_2<this.molecules[type_2].length; mol_2++){
-                        distance += this.calc_distance_mol([type_1, mol_1], [type_2, mol_2], tolerance);
-                    }
-                }
+    public async calc_distance_box(tolerance:number, coordinates:Tensor2D = this.coordinates):Promise<number> {
+        let array_center = <Tensor1D[]>coordinates.unstack();
+        if(coordinates != this.coordinates) coordinates.dispose();
+
+        let wait_XYZ:Promise<number>[] = [];
+        for(let i=0; i<array_center.length; i++){
+            for(let j=i+1; j<array_center.length; j++){
+                wait_XYZ.push(this.calc_distance_mol(i, array_center[i], j, array_center[j], tolerance));
             }
         }
+
+        let distance = await Promise.all(wait_XYZ).then((mdis) => {
+            let temp = 0.0;
+            mdis.forEach((val) => {
+                temp += val;
+            });
+            return temp;
+        });
         return distance;
     }
 
-    public to_XYZ():{natom:number, xyz:string} {
-        let natom = 0;
-        this.molecule_types.forEach((type, index) => {
-            natom += type.get_natom()*this.num_mol[index];
-        });
+    public async to_XYZ(coordinates:Tensor2D = this.coordinates):Promise<{natom: number, xyz: string}> {
+        let  array_center = await coordinates.array();
+        if(array_center.length<=0) throw "molecules in box have no coordinate";
 
-        let xyz = "";
-        this.molecules.forEach((type) => {
-            type.forEach((mol) => {
-                xyz += mol.to_XYZ()["xyz"];
+        let wait_XYZ:Promise<{natom: number, xyz: string}>[] = [];
+        array_center.forEach((center, index) => {
+            let mol = this.mol[index]
+            wait_XYZ.push(mol.to_XYZ(<Tensor2D>mol.get_coordinates().add(center)));
+        });
+        if(coordinates != this.coordinates) coordinates.dispose();
+
+        return Promise.all(wait_XYZ).then((val) => {
+            let natom = 0;
+            this.mol_types.forEach((type, index) => {
+                natom += type.get_natom() * this.num_mol[index];
             });
-        });
 
-        return {natom, xyz};
+            let xyz = "";
+            val.forEach((val) => {
+                xyz += val["xyz"];
+            });
+
+            return {natom, xyz};
+        });
     }
 
     public get_molecules(){
-        return this.molecules;
+        return this.mol;
     }
 }
 
 // test
+let t_1 = Date.now();
 var data = fs.readFileSync('H2O.xyz');
-let h2o = new Molecule(data.toString());
-h2o.move_to_zero();
-let box = new Packmol([10], "cube");
-box.add_molecule(h2o, 10);
+let h2o = new Structure(data.toString());
+let box = new Packmol([50], "cube");
+box.add_molecule(h2o, 1000);
 box.random_coordinates();
-let temp_xyz = box.to_XYZ();
-console.log(String(temp_xyz["natom"])+"\ndistence error: "+ String(box.calc_distance_box(2)) +"\n"+temp_xyz["xyz"]+"\n")
+let p = [box.to_XYZ(), box.calc_distance_box(2)];
+Promise.all(p).then((val) => {
+    console.log(String(val[0]["natom"])+"\ndistence error: "+ String(val[1]) +"\n"+val[0]["xyz"]+"\n")
+    console.log(tf.memory(), "\n", String(val[1]), "\n", Date.now() - t_1);
+});
